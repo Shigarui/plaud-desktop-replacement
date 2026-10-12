@@ -71,6 +71,23 @@ class Config:
     # 16000 measured cleanest on a Bluetooth headset; leave unset for wired.
     mic_rate: Optional[int] = None
 
+    # --- screenshots ---
+    # Visual context from the meeting window. Pinned to that window only, and
+    # only while it is in the foreground, so other apps are never captured.
+    screenshots: bool = False
+    screenshot_interval: float = 3.0        # how often to look
+    screenshot_min_gap: float = 15.0        # never save more often than this
+    screenshot_change_threshold: int = 12   # dhash bits (0-64); lower = fussier
+    screenshot_quality: int = 70
+    screenshot_max_per_meeting: int = 200
+    screenshot_foreground_only: bool = True
+    # Capture whatever is on top, not just the meeting window. Needed to catch
+    # your own screen shares — the app you share renders in its own window.
+    screenshot_follow_foreground: bool = True
+    # Window titles / process names never captured, case-insensitive substrings.
+    # None uses the built-in list (password managers, banking, private windows).
+    screenshot_exclude: Optional[list] = None
+
     # --- storage ---
     # backend: "drive" (Drive for Desktop), "driveapi" (API v3), or "local"
     backend: str = "drive"
@@ -104,7 +121,7 @@ class Config:
             raw: dict[str, Any] = tomllib.load(fh)
 
         flat: dict[str, Any] = {}
-        for section in ("detection", "capture", "storage", "paths", "misc"):
+        for section in ("detection", "capture", "screenshots", "storage", "paths", "misc"):
             flat.update(raw.get(section, {}))
         flat.update({k: v for k, v in raw.items() if not isinstance(v, dict)})
 

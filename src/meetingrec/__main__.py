@@ -17,6 +17,7 @@ from .detector import (
     MeetingSession,
 )
 from .recorder import DualRecorder, list_devices
+from .screenshots import ScreenshotCapturer
 from .storage import build_backend, find_drive_desktop_root, safe_name, session_subdir
 
 log = logging.getLogger("meetingrec")
@@ -170,12 +171,30 @@ def cmd_run(cfg: Config) -> int:
     rec = _build_recorder(cfg)
     rec.start()
 
+    shots: Optional[ScreenshotCapturer] = None
+    if cfg.screenshots:
+        shots = ScreenshotCapturer(
+            interval=cfg.screenshot_interval,
+            min_gap_seconds=cfg.screenshot_min_gap,
+            change_threshold=cfg.screenshot_change_threshold,
+            quality=cfg.screenshot_quality,
+            max_per_meeting=cfg.screenshot_max_per_meeting,
+            foreground_only=cfg.screenshot_foreground_only,
+            follow_foreground=cfg.screenshot_follow_foreground,
+            **({"exclude": tuple(cfg.screenshot_exclude)}
+               if cfg.screenshot_exclude else {}),
+        )
+        shots.start()
+
     def on_start(s: MeetingSession) -> None:
         slug = f"{s.started_at.astimezone():%Y%m%d-%H%M%S}-{safe_name(s.app, 30)}"
         rec.start_recording(slug)
+        if shots:
+            shots.arm(cfg.staging_dir, slug, s.app)
 
     def on_stop(s: MeetingSession) -> None:
         result = rec.stop_recording()
+        shot_stats = shots.disarm() if shots else None
         if not result:
             return
 
@@ -209,7 +228,12 @@ def cmd_run(cfg: Config) -> int:
             "detection_lag_seconds": round(s.detection_lag.total_seconds(), 1),
             "machine": cfg.machine,
         }
-        for path in result.paths:
+        extra = list(shot_stats.paths) if shot_stats else []
+        if extra:
+            meta["screenshots"] = len(extra)
+            meta["window_title"] = shot_stats.window_title
+
+        for path in result.paths + extra:
             outcome = backend.archive(path, subdir, meta)
             if not outcome.ok:
                 log.error("archive failed for %s: %s — file kept in staging",
@@ -231,6 +255,8 @@ def cmd_run(cfg: Config) -> int:
         pass
     finally:
         rec.shutdown()
+        if shots:
+            shots.stop()
     return 0
 
 

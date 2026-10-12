@@ -23,7 +23,3 @@ dist/
 # windows
 Thumbs.db
 desktop.ini
-
-Archive/
-*.zip
-*.pdf

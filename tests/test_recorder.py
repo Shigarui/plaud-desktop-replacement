@@ -922,3 +922,14 @@ def test_align_skips_when_a_timestamp_is_missing(tmp_path):
     mic = tmp_path / "mic.wav"
     _make_wav(mic, 48000, 1.0, 1)
     assert align_tracks(mic, None, None, None)["aligned"] is False
+
+
+def test_stream_has_no_method_shadowing_thread_attributes():
+    """Same guard as the screenshot capturer — _Stream is a Thread too."""
+    import threading
+
+    probe = threading.Thread()
+    reserved = {n for n in vars(probe) if n.startswith("_")}
+    ours = {n for n in vars(_Stream) if n.startswith("_")
+            and callable(getattr(_Stream, n, None))}
+    assert not (ours & reserved), f"shadowed by Thread: {sorted(ours & reserved)}"

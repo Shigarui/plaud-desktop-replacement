@@ -67,6 +67,40 @@ conceal_dropouts = true
 # nothing else, and the measurement sits near its threshold.
 normalize_mic_rate = false
 
+[screenshots]
+# Visual context from the meeting window: shared slides, demos, whiteboards.
+# Off by default — it captures what is on screen, which deserves a deliberate
+# choice. Needs the extra:  py -m pip install -e ".[screenshots]"
+screenshots = false
+
+# Pinned to the meeting app's own window, never the whole monitor, so email
+# and Slack sitting behind it are not captured. Only while that window is in
+# the foreground: alt-tab away and capture pauses, which also means whatever
+# you switched to is never recorded.
+screenshot_foreground_only = true
+
+# Capture whatever window is on top, not only the meeting window. Needed to
+# catch your OWN screen shares: Teams and Zoom stream shared content out
+# rather than rendering it back into their window, so sharing a browser tab
+# shows up as a "you are sharing" banner and nothing else. Following the
+# foreground catches the tab itself.
+# The cost: anything you look at during a call can be archived. See
+# screenshot_exclude below.
+screenshot_follow_foreground = true
+
+# Never captured, whatever is on top. Substrings matched case-insensitively
+# against window title and process name. Omit to use the built-in list:
+# password managers, authenticators, banking, payroll, private browsing.
+# screenshot_exclude = ["password", "bitwarden", "bank", "incognito", "Signal"]
+
+screenshot_interval = 3.0          # how often to look at the window
+screenshot_min_gap = 15.0          # never save more often than this
+screenshot_change_threshold = 12   # dhash bits 0-64; lower = fussier.
+                                   # Measured: slide changes score 14-21,
+                                   # a moving cursor 0, webcam churn 2.
+screenshot_quality = 70
+screenshot_max_per_meeting = 200
+
 [storage]
 # "drive"    = Google Drive for Desktop (filesystem move, no auth) <- start here
 # "driveapi" = Drive API v3 resumable upload (needs an OAuth client)

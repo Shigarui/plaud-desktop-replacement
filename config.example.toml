@@ -1,0 +1,91 @@
+# Copy to config.toml and edit. config.toml is gitignored — every machine
+# keeps its own, because device names differ and a wrong one records silence.
+#
+# Everything here has a working default in config.py; uncomment only what you
+# need to change. The values shown are the defaults.
+
+[detection]
+poll_interval = 2.0
+stop_debounce = 45.0            # muting does not release the mic, so this is
+                                # really for device switches and tab reloads
+require_playback_for_ambiguous = true
+
+# Replaces the built-in list entirely, so include everything you use.
+# Run `py -m meetingrec list` during a real call to get exact names —
+# new Teams reports as a packaged identity, not an exe.
+# allowlist = ["msteams_8wekyb3d8bbwe", "teams.exe", "ms-teams.exe",
+#              "zoom.exe", "slack.exe", "webexmta.exe",
+#              "chrome.exe", "msedge.exe", "firefox.exe"]
+
+# Browsers need a playback session too, or voice-typing would trigger a
+# recording. Listed names must also appear in allowlist.
+# ambiguous = ["chrome.exe", "msedge.exe", "firefox.exe"]
+
+[capture]
+sample_rate = 48000
+preroll_seconds = 30.0          # system audio only; the mic opens on demand
+min_session_seconds = 60.0      # shorter meetings are DELETED, not archived
+
+# Mics in priority order. Put the device you actually wear first: a dongle
+# whose headset is switched off opens cleanly and records pure digital
+# silence. There is a watchdog for that, but it costs 12 seconds.
+# Partial names match.
+# mic_device = ["Headset (soundcore Liberty 5 Pro Max)",
+#               "Headset Microphone (Poly BT700)"]
+
+# Force the capture rate. Some Bluetooth endpoints accept 48000 and upsample
+# a 16 kHz link behind the scenes, adding dropouts and no detail.
+# mic_rate = 16000
+
+# 1024 frames (~21 ms). Measured on a Bluetooth mic: 4096 produced 9-26%
+# digital silence, 1024 produced 0.2%. Large WASAPI buffers starve between
+# packets and return zeros. 256 starves the other way (62%).
+block_frames = 1024
+
+# Let a lazily-opened mic settle before the file opens. A fresh Bluetooth
+# stream dropped ~20% of its first five seconds and 0.0% for the next 45.
+warmup_seconds = 1.5
+
+# Keep the mic closed until a meeting starts, so a Bluetooth headset stays in
+# A2DP and your music is not 16 kHz mono all day. Costs mic pre-roll only.
+lazy_mic = true
+
+# High-pass then normalise the mic track. Desk mics sit in a bath of
+# sub-300 Hz rumble that buries the speech band; measured 88% below 300 Hz
+# before filtering, 8% in the 300-3000 Hz band where intelligibility lives.
+clean_mic = true
+highpass_hz = 300.0             # 300 suits a headset; 120-150 a close wired
+                                # mic. Too high = thin, too low = boomy.
+keep_raw_mic = false            # true also writes *-mic-raw.wav for A/B
+
+# Bluetooth packet loss arrives as runs of exact zeros, which sound like
+# clicks. Short gaps are bridged from surrounding audio, long ones ramped.
+conceal_dropouts = true
+
+# Rewrite a narrowband track at its true rate instead of storing upsampled
+# 48 kHz carrying 16 kHz of information. Off by default: it saves disk and
+# nothing else, and the measurement sits near its threshold.
+normalize_mic_rate = false
+
+[storage]
+# "drive"    = Google Drive for Desktop (filesystem move, no auth) <- start here
+# "driveapi" = Drive API v3 resumable upload (needs an OAuth client)
+# "local"    = plain directory
+backend = "drive"
+drive_folder = "Meeting Recordings"
+group_by = "month"              # month | day | flat
+
+# Auto-detected if omitted. Set explicitly with several Drive accounts.
+# drive_root = "G:/My Drive"
+
+# backend = "local" only
+# archive_dir = "D:/Archive/Meetings"
+
+# backend = "driveapi" only. Note: an External consent screen still in
+# Testing expires refresh tokens after 7 days.
+# drive_credentials = "client_secret.json"
+# drive_token = "token.json"
+# drive_shared_drive_id = ""
+
+[misc]
+notify_on_start = true          # placeholder — not yet implemented

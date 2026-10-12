@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "meetingrec"
+version = "0.1.0"
+description = "Detect virtual meetings on Windows, record desktop + mic, archive to Google Drive."
+requires-python = ">=3.11"
+dependencies = [
+    "soundcard>=0.4.3",    # WASAPI loopback — the one thing it does flawlessly
+    "sounddevice>=0.5.0",  # PortAudio — mics, including ones soundcard refuses
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+# Playback corroboration for browser-based meetings. Optional; the detector
+# degrades to mic-only evidence without it.
+detect = ["pycaw>=20240210", "comtypes>=1.2", "psutil>=5.9"]
+# Only needed for backend = "driveapi". The "drive" backend needs nothing.
+driveapi = [
+    "google-api-python-client>=2.120",
+    "google-auth-oauthlib>=1.2",
+    "google-auth-httplib2>=0.2",
+]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+meetingrec = "meetingrec.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

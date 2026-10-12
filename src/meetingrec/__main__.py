@@ -1,0 +1,281 @@
+"""CLI entry point:  py -m meetingrec <command>"""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import sys
+import time
+from datetime import datetime
+from typing import Optional
+
+from .config import Config
+from .detector import (
+    FILETIME_EPOCH,
+    ConsentStoreProbe,
+    MeetingDetector,
+    MeetingSession,
+)
+from .recorder import DualRecorder, list_devices
+from .storage import build_backend, find_drive_desktop_root, safe_name, session_subdir
+
+log = logging.getLogger("meetingrec")
+
+
+def _print_track_stats(result, cfg: Config) -> None:
+    """Shared summary for testrecord and run."""
+    alignment = result.stats.get("alignment") or {}
+    if alignment.get("padded"):
+        print(f"  aligned: padded {alignment['padded']} by "
+              f"{alignment['padded_seconds']}s (offset {alignment['offset_seconds']}s)")
+
+    for role, st in result.stats.items():
+        if role == "alignment" or not isinstance(st, dict):
+            continue
+        rate = st.get("rate") or cfg.sample_rate
+        print(f"  [{role}] device={st.get('device', '?')} @ {rate} Hz "
+              f"blocks={st.get('blocks', 0)} "
+              f"padded={st.get('frames_padded', 0) / max(rate, 1):.2f}s "
+              f"errors={st.get('errors', 0)}"
+              + ("  (FALLBACK)" if st.get("fallback") else ""))
+        if st.get("dead_devices"):
+            print(f"         DEAD DEVICES SKIPPED: {', '.join(st['dead_devices'])}")
+        if st.get("dropouts"):
+            print(f"         dropouts: {st['dropouts']} ({st['dropout_pct']}% of file) "
+                  f"- {st['bridged']} bridged, {st['ramped']} ramped")
+        if "speech_band_after" in st:
+            print(f"         speech band: {st['speech_band_before'] * 100:.0f}%"
+                  f" -> {st['speech_band_after'] * 100:.0f}% "
+                  f"(HPF {st['highpass_hz']:.0f} Hz, gain {st['gain_db']:+.1f} dB)")
+
+
+def cmd_list(cfg: Config) -> int:
+    probe = ConsentStoreProbe()
+    entries = probe.read_all(active_only=False)
+    if not entries:
+        print("No consent-store entries found.")
+        return 1
+    active_keys = {(u.name, u.started_at) for u in probe.read_all(active_only=True)}
+    print(f"{len(entries)} app(s) have used the microphone:\n")
+    for u in sorted(entries, key=lambda x: (x.started_at or FILETIME_EPOCH), reverse=True):
+        flag = "  <== MIC OPEN NOW" if (u.name, u.started_at) in active_keys else ""
+        when = u.started_at.astimezone().strftime("%Y-%m-%d %H:%M:%S") if u.started_at else "never"
+        print(f"  [{'pkg' if u.packaged else 'exe'}] {u.name:<40} last start {when}{flag}")
+        if u.path:
+            print(f"         {u.path}")
+    return 0
+
+
+def cmd_watch(cfg: Config) -> int:
+    def on_start(s: MeetingSession) -> None:
+        print(f"\n>>> START  #{s.session_id}  {s.app}  {s.started_at.astimezone():%H:%M:%S}")
+
+    def on_stop(s: MeetingSession) -> None:
+        print(f"<<< STOP   #{s.session_id}  {str(s.duration).split('.')[0]}  "
+              f"apps={','.join(sorted(s.apps_seen))}\n")
+
+    d = MeetingDetector(
+        poll_interval=cfg.poll_interval,
+        stop_debounce=cfg.stop_debounce,
+        allowlist=cfg.allowlist,
+        ambiguous=cfg.ambiguous,
+        require_playback_for_ambiguous=cfg.require_playback_for_ambiguous,
+        on_start=on_start,
+        on_stop=on_stop,
+    )
+    last = ""
+    try:
+        while True:
+            state = d.poll_once()
+            holders = ", ".join(str(u) for u in d.qualifying_apps()) or "-"
+            line = f"{state:<12} {holders}"
+            if line != last:
+                print(f"[{datetime.now():%H:%M:%S}] {line}")
+                last = line
+            time.sleep(cfg.poll_interval)
+    except KeyboardInterrupt:
+        print("\nstopped")
+        return 0
+
+
+def cmd_storage(cfg: Config) -> int:
+    """Verify the archive target before trusting it with a real recording."""
+    print(f"backend      : {cfg.backend}")
+    print(f"staging dir  : {cfg.staging_dir}  (exists={cfg.staging_dir.exists()})")
+    root = find_drive_desktop_root()
+    print(f"Drive desktop: {root or 'NOT FOUND'}")
+    try:
+        backend = build_backend(cfg)
+    except Exception as exc:
+        print(f"backend init FAILED: {exc}")
+        return 1
+    print(f"resolved     : {backend.name}")
+
+    probe = cfg.staging_dir / "meetingrec-storage-test.txt"
+    probe.write_text(f"written {datetime.now():%Y-%m-%d %H:%M:%S} by meetingrec\n",
+                     encoding="utf-8")
+    result = backend.archive(probe, "_selftest", {"test": True, "machine": cfg.machine})
+    print(f"archive      : {'OK' if result.ok else 'FAILED'}  {result.location or result.error}")
+    return 0 if result.ok else 1
+
+
+def cmd_devices(cfg: Config) -> int:
+    print(list_devices())
+    return 0
+
+
+def _build_recorder(cfg: Config, mic: Optional[str] = None) -> DualRecorder:
+    return DualRecorder(
+        cfg.staging_dir,
+        rate=cfg.sample_rate,
+        preroll_seconds=cfg.preroll_seconds,
+        mic_device=mic or cfg.mic_device,
+        normalize_mic_rate=cfg.normalize_mic_rate,
+        clean_mic=cfg.clean_mic,
+        highpass_hz=cfg.highpass_hz,
+        keep_raw_mic=cfg.keep_raw_mic,
+        conceal_dropouts=cfg.conceal_dropouts,
+        lazy_mic=cfg.lazy_mic,
+        block_frames=cfg.block_frames,
+        warmup_seconds=cfg.warmup_seconds,
+        mic_rate=cfg.mic_rate,
+    )
+
+
+def cmd_testrecord(cfg: Config, seconds: float = 15.0, mic: Optional[str] = None) -> int:
+    """Record a fixed window with no detector involved. Proves the audio path."""
+    rec = _build_recorder(cfg, mic)
+    rec.start()
+    print(f"warming up pre-roll for 3s, then recording {seconds:.0f}s...")
+    print("PLAY SOMETHING (a video, music) AND TALK so both tracks have signal.")
+    time.sleep(3)
+    rec.start_recording(f"testrecord-{datetime.now():%Y%m%d-%H%M%S}")
+    time.sleep(seconds)
+    result = rec.shutdown()
+    if not result:
+        print("nothing recorded")
+        return 1
+    print(f"\nduration: {result.duration_seconds:.1f}s "
+          f"(includes {result.preroll_seconds:.1f}s pre-roll)")
+    for path in result.paths:
+        print(f"  {path.stat().st_size / 1_000_000:7.2f} MB  {path}")
+    _print_track_stats(result, cfg)
+    print("\nListen to all three before trusting this.")
+    return 0
+
+
+def cmd_run(cfg: Config) -> int:
+    """The real thing: detect, record, archive."""
+    backend = build_backend(cfg)
+    rec = _build_recorder(cfg)
+    rec.start()
+
+    def on_start(s: MeetingSession) -> None:
+        slug = f"{s.started_at.astimezone():%Y%m%d-%H%M%S}-{safe_name(s.app, 30)}"
+        rec.start_recording(slug)
+
+    def on_stop(s: MeetingSession) -> None:
+        result = rec.stop_recording()
+        if not result:
+            return
+
+        alignment = result.stats.get("alignment") or {}
+        if alignment.get("padded"):
+            log.info("aligned tracks: padded %s by %.2fs (offset %.2fs)",
+                     alignment["padded"], alignment["padded_seconds"],
+                     alignment["offset_seconds"])
+
+        for role, st in result.stats.items():
+            if role == "alignment" or not isinstance(st, dict):
+                continue
+            if st.get("dead_devices"):
+                log.error("[%s] recorded from a dead device during this meeting: %s",
+                          role, ", ".join(st["dead_devices"]))
+
+        if result.duration_seconds < cfg.min_session_seconds:
+            log.info("discarding %.0fs session (under min_session_seconds)",
+                     result.duration_seconds)
+            for p in result.paths:
+                p.unlink(missing_ok=True)
+            return
+
+        subdir = session_subdir(s.started_at.astimezone(), cfg.machine, cfg.group_by)
+        meta = {
+            "app": s.app,
+            "apps_seen": sorted(s.apps_seen),
+            "started_at": s.started_at.isoformat(),
+            "ended_at": s.ended_at.isoformat() if s.ended_at else None,
+            "duration_seconds": round(result.duration_seconds, 1),
+            "detection_lag_seconds": round(s.detection_lag.total_seconds(), 1),
+            "machine": cfg.machine,
+        }
+        for path in result.paths:
+            outcome = backend.archive(path, subdir, meta)
+            if not outcome.ok:
+                log.error("archive failed for %s: %s — file kept in staging",
+                          path.name, outcome.error)
+
+    detector = MeetingDetector(
+        poll_interval=cfg.poll_interval,
+        stop_debounce=cfg.stop_debounce,
+        allowlist=cfg.allowlist,
+        ambiguous=cfg.ambiguous,
+        require_playback_for_ambiguous=cfg.require_playback_for_ambiguous,
+        on_start=on_start,
+        on_stop=on_stop,
+    )
+    print("meetingrec running. Ctrl-C to stop.")
+    try:
+        detector.run()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        rec.shutdown()
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(prog="meetingrec", description="Meeting detection and recording.")
+    p.add_argument(
+        "command",
+        choices=["list", "watch", "storage", "devices", "testrecord", "run"],
+        help="list: mic consent entries | watch: live detection | storage: test archive | "
+             "devices: audio devices | testrecord: fixed-length capture | run: detect+record+archive",
+    )
+    p.add_argument("--seconds", type=float, default=15.0, help="testrecord length")
+    p.add_argument("--mic", help="override mic_device for this run (partial name is fine)")
+    p.add_argument("-v", "--verbose", action="store_true")
+    args = p.parse_args(argv)
+
+    # Windows consoles default to a legacy code page (cp1252), so any log line
+    # containing an em dash or arrow raises UnicodeEncodeError and is silently
+    # dropped. Reconfigure before the first log call.
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    if sys.platform != "win32":
+        print("meetingrec only runs on Windows.", file=sys.stderr)
+        return 2
+
+    cfg = Config.load()
+    if args.command == "testrecord":
+        return cmd_testrecord(cfg, args.seconds, args.mic)
+    return {
+        "list": cmd_list,
+        "watch": cmd_watch,
+        "storage": cmd_storage,
+        "devices": cmd_devices,
+        "run": cmd_run,
+    }[args.command](cfg)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

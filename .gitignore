@@ -1,0 +1,25 @@
+# machine-specific
+config.toml
+client_secret.json
+token.json
+
+# recordings never go in git
+recordings/
+*.wav
+*.opus
+*.m4a
+*.mp3
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+
+# windows
+Thumbs.db
+desktop.ini

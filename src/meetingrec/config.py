@@ -35,6 +35,12 @@ class Config:
     allowlist: Optional[list[str]] = None  # None -> detector defaults
     ambiguous: Optional[list[str]] = None
     require_playback_for_ambiguous: bool = True
+    # How microphone use is detected:
+    #   "sessions" — live WASAPI capture sessions. Reliable on every build.
+    #   "consent"  — the registry consent store. Gives a true meeting start
+    #                time, but silently stops updating on some builds.
+    #   "auto"     — sessions where available, consent otherwise.
+    detection_source: str = "auto"
 
     # --- capture ---
     sample_rate: int = 48000
@@ -94,6 +100,9 @@ class Config:
     staging_dir: Path = field(default_factory=lambda: PROJECT_ROOT / "recordings")
     archive_dir: Optional[Path] = None  # only used by backend = "local"
     group_by: str = "month"  # month | day | flat
+    # One folder per meeting inside that, so a call's audio, screenshots and
+    # metadata stay together instead of interleaving with every other meeting.
+    folder_per_meeting: bool = True
 
     # Drive for Desktop
     drive_folder: str = "Meeting Recordings"

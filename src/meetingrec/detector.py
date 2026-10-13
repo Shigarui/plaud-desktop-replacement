@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import itertools
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -96,11 +97,12 @@ def filetime_to_dt(ft: int) -> Optional[datetime]:
 class MicUser:
     """An app currently holding the microphone."""
 
-    key: str  # raw registry subkey name
+    key: str  # registry subkey name, or "pid:<n>" for a live session
     name: str  # lowercase exe name, or package family name
     path: Optional[str]  # full exe path for non-packaged apps
     packaged: bool
     started_at: Optional[datetime]
+    device: Optional[str] = None  # which microphone, when known
 
     def __str__(self) -> str:
         when = self.started_at.astimezone().strftime("%H:%M:%S") if self.started_at else "?"
@@ -460,3 +462,147 @@ class MeetingDetector:
         self._stop_event.set()
         if self._thread:
             self._thread.join(timeout)
+
+
+# --------------------------------------------------------------------------
+# live capture sessions (WASAPI)
+# --------------------------------------------------------------------------
+
+
+class CaptureSessionProbe:
+    """
+    Asks the audio engine which processes are capturing right now.
+
+    This exists because the consent store cannot be trusted. On one Windows
+    build it updates per call and gives a true meeting start time; on another
+    it had not been written for two months while Settings happily displayed
+    the same day's activity from somewhere else. Identical code, identical
+    approach, completely different result — so the registry is at best a
+    bonus source, not the foundation.
+
+    A live WASAPI session cannot go stale: it reflects what the audio engine
+    is doing this instant. It also reports WHICH microphone an app is using,
+    which the registry never did.
+
+    The trade-off is that there is no history. We learn a meeting started when
+    we notice it, not when it actually began, so the pre-roll buffer matters
+    more here.
+    """
+
+    EXCLUDE_PIDS = {os.getpid()}
+    AUDIO_SESSION_STATE_ACTIVE = 1
+    DEVICE_STATE_ACTIVE = 0x1
+    EDATAFLOW_CAPTURE = 1
+
+    def __init__(self, exclude_self: bool = True):
+        self.available = False
+        self.exclude_self = exclude_self
+        self._warned = False
+        try:
+            import comtypes  # noqa: F401
+            import psutil  # noqa: F401
+            from pycaw.pycaw import IAudioSessionManager2  # noqa: F401
+
+            self.available = True
+        except Exception as exc:
+            log.info("capture-session probe unavailable (%s)", exc)
+
+    def __call__(self) -> list[MicUser]:
+        if not self.available:
+            return []
+        try:
+            return self._read()
+        except Exception as exc:
+            if not self._warned:
+                log.warning("capture-session probe failed (%r) — falling back", exc)
+                self._warned = True
+            return []
+
+    def _read(self) -> list[MicUser]:
+        import comtypes
+        import psutil
+        from comtypes import CLSCTX_ALL, CLSCTX_INPROC_SERVER
+        from pycaw.constants import CLSID_MMDeviceEnumerator
+        from pycaw.pycaw import (
+            AudioUtilities,
+            IAudioSessionControl2,
+            IAudioSessionManager2,
+            IMMDeviceEnumerator,
+        )
+
+        # Each poll may land on a thread COM has not seen before.
+        try:
+            comtypes.CoInitialize()
+        except Exception:
+            pass
+
+        enumerator = comtypes.CoCreateInstance(
+            CLSID_MMDeviceEnumerator, IMMDeviceEnumerator, CLSCTX_INPROC_SERVER)
+        collection = enumerator.EnumAudioEndpoints(
+            self.EDATAFLOW_CAPTURE, self.DEVICE_STATE_ACTIVE)
+
+        now = datetime.now(timezone.utc)
+        out: list[MicUser] = []
+        seen: set[tuple[str, str]] = set()
+
+        for i in range(collection.GetCount()):
+            dev = collection.Item(i)
+            try:
+                device_name = AudioUtilities.CreateDevice(dev).FriendlyName
+            except Exception:
+                device_name = "?"
+            try:
+                mgr = dev.Activate(IAudioSessionManager2._iid_, CLSCTX_ALL, None)
+                mgr = mgr.QueryInterface(IAudioSessionManager2)
+                sessions = mgr.GetSessionEnumerator()
+            except Exception:
+                continue
+
+            for j in range(sessions.GetCount()):
+                try:
+                    ctl = sessions.GetSession(j)
+                    if ctl.GetState() != self.AUDIO_SESSION_STATE_ACTIVE:
+                        continue
+                    pid = ctl.QueryInterface(IAudioSessionControl2).GetProcessId()
+                except Exception:
+                    continue
+                if not pid or (self.exclude_self and pid in self.EXCLUDE_PIDS):
+                    continue
+                try:
+                    proc = psutil.Process(pid)
+                    name, path = proc.name(), proc.exe()
+                except Exception:
+                    continue
+
+                # The same app often holds several endpoints at once.
+                sig = (name.lower(), device_name)
+                if sig in seen:
+                    continue
+                seen.add(sig)
+                out.append(MicUser(key=f"pid:{pid}", name=name.lower(), path=path,
+                                   packaged=False, started_at=now, device=device_name))
+        return out
+
+
+def build_mic_source(mode: str = "auto"):
+    """
+    Choose how to detect microphone use.
+
+    "sessions" is the reliable one and the default. "consent" reads the
+    registry, which gives a true start time where it works. "auto" prefers
+    sessions and falls back.
+    """
+    mode = (mode or "auto").lower()
+    if mode == "consent":
+        return ConsentStoreProbe()
+    if mode == "sessions":
+        return CaptureSessionProbe()
+
+    probe = CaptureSessionProbe()
+    if probe.available and probe():
+        return probe
+    if probe.available:
+        # No active sessions right now is normal — nobody is in a meeting.
+        return probe
+    log.info("falling back to the consent store for detection")
+    return ConsentStoreProbe()

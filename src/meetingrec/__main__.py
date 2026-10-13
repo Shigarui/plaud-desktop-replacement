@@ -12,9 +12,11 @@ from typing import Optional
 from .config import Config
 from .detector import (
     FILETIME_EPOCH,
+    CaptureSessionProbe,
     ConsentStoreProbe,
     MeetingDetector,
     MeetingSession,
+    build_mic_source,
 )
 from .recorder import DualRecorder, list_devices
 from .screenshots import ScreenshotCapturer
@@ -51,11 +53,23 @@ def _print_track_stats(result, cfg: Config) -> None:
 
 
 def cmd_list(cfg: Config) -> int:
+    live = CaptureSessionProbe()
+    if live.available:
+        active = live()
+        print("Capturing RIGHT NOW (live audio sessions):")
+        if active:
+            for u in active:
+                print(f"    {u.name:<30} on {u.device}")
+        else:
+            print("    (nothing)")
+        print()
+
     probe = ConsentStoreProbe()
     entries = probe.read_all(active_only=False)
     if not entries:
-        print("No consent-store entries found.")
-        return 1
+        print("No consent-store entries found. On some Windows builds this")
+        print("store stops updating entirely — detection uses live sessions.")
+        return 0
     active_keys = {(u.name, u.started_at) for u in probe.read_all(active_only=True)}
     print(f"{len(entries)} app(s) have used the microphone:\n")
     for u in sorted(entries, key=lambda x: (x.started_at or FILETIME_EPOCH), reverse=True):
@@ -76,6 +90,7 @@ def cmd_watch(cfg: Config) -> int:
               f"apps={','.join(sorted(s.apps_seen))}\n")
 
     d = MeetingDetector(
+        mic_source=build_mic_source(cfg.detection_source),
         poll_interval=cfg.poll_interval,
         stop_debounce=cfg.stop_debounce,
         allowlist=cfg.allowlist,
@@ -218,7 +233,9 @@ def cmd_run(cfg: Config) -> int:
                 p.unlink(missing_ok=True)
             return
 
-        subdir = session_subdir(s.started_at.astimezone(), cfg.machine, cfg.group_by)
+        subdir = session_subdir(
+            s.started_at.astimezone(), cfg.machine, cfg.group_by,
+            slug=result.session_slug if cfg.folder_per_meeting else None)
         meta = {
             "app": s.app,
             "apps_seen": sorted(s.apps_seen),
@@ -240,6 +257,7 @@ def cmd_run(cfg: Config) -> int:
                           path.name, outcome.error)
 
     detector = MeetingDetector(
+        mic_source=build_mic_source(cfg.detection_source),
         poll_interval=cfg.poll_interval,
         stop_debounce=cfg.stop_debounce,
         allowlist=cfg.allowlist,

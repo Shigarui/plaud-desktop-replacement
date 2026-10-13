@@ -361,10 +361,16 @@ def build_backend(cfg) -> StorageBackend:
     return LocalArchive(Path(root))
 
 
-def session_subdir(started_at: datetime, machine: str, group_by: str = "month") -> str:
+def session_subdir(started_at: datetime, machine: str, group_by: str = "month",
+                   slug: Optional[str] = None) -> str:
     """
-    Folder layout inside the archive. Machine-first keeps three machines from
-    colliding and makes it obvious where a recording came from.
+    Folder layout inside the archive.
+
+    Machine-first keeps several machines from colliding and makes it obvious
+    where a recording came from. Passing a slug adds a folder per meeting,
+    which matters once screenshots are on: a month of flat files is three
+    audio tracks and a dozen images per call all jumbled together, and sorting
+    by name interleaves meetings rather than separating them.
     """
     if group_by == "day":
         stamp = started_at.strftime("%Y/%m/%d")
@@ -372,4 +378,8 @@ def session_subdir(started_at: datetime, machine: str, group_by: str = "month") 
         stamp = ""
     else:
         stamp = started_at.strftime("%Y/%m")
-    return f"{safe_name(machine)}/{stamp}".rstrip("/")
+
+    parts = [safe_name(machine), stamp]
+    if slug:
+        parts.append(safe_name(slug, 60))
+    return "/".join(p for p in parts if p)

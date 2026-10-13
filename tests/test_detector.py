@@ -119,3 +119,64 @@ def test_duration_excludes_debounce_tail(rig):
     d.poll_once()
     assert session.ended_at == session.last_active_at
     assert session.duration.total_seconds() < 5  # not ~45
+
+
+# --- detection source selection --------------------------------------------
+
+
+def test_micuser_carries_the_device_it_was_seen_on():
+    """Live sessions report which microphone an app is using; the registry
+    never did. The field must be optional so consent-store entries still fit."""
+    from meetingrec.detector import MicUser
+
+    live = MicUser(key="pid:123", name="ms-teams.exe", path=None, packaged=False,
+                   started_at=datetime.now(timezone.utc),
+                   device="Headset (soundcore Liberty 5 Pro Max)")
+    assert live.device.startswith("Headset")
+
+    from_registry = MicUser(key="k", name="zoom.exe", path=None, packaged=False,
+                            started_at=datetime.now(timezone.utc))
+    assert from_registry.device is None
+
+
+def test_build_mic_source_honours_an_explicit_choice():
+    from meetingrec.detector import (
+        CaptureSessionProbe,
+        ConsentStoreProbe,
+        build_mic_source,
+    )
+
+    try:
+        assert isinstance(build_mic_source("consent"), ConsentStoreProbe)
+    except RuntimeError:
+        pass  # ConsentStoreProbe refuses to construct off Windows
+    assert isinstance(build_mic_source("sessions"), CaptureSessionProbe)
+
+
+def test_session_probe_degrades_quietly_without_its_dependencies():
+    """Off Windows, or without pycaw, it must report nothing rather than raise."""
+    from meetingrec.detector import CaptureSessionProbe
+
+    probe = CaptureSessionProbe()
+    assert probe() == [] or probe.available
+
+
+def test_session_probe_excludes_our_own_process():
+    """meetingrec opens the mic itself once recording starts; seeing that as
+    a meeting would make it self-triggering."""
+    import os
+
+    from meetingrec.detector import CaptureSessionProbe
+
+    assert os.getpid() in CaptureSessionProbe.EXCLUDE_PIDS
+
+
+def test_detector_accepts_session_shaped_users():
+    """The state machine must not care which probe produced its input."""
+    from meetingrec.detector import IN_MEETING, MeetingDetector, MicUser
+
+    user = MicUser(key="pid:99", name="ms-teams.exe", path="C:/x/ms-teams.exe",
+                   packaged=False, started_at=datetime.now(timezone.utc),
+                   device="Headset")
+    d = MeetingDetector(mic_source=lambda: [user], playback_source=lambda: set())
+    assert d.poll_once() == IN_MEETING

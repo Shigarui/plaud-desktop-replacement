@@ -10,6 +10,17 @@ stop_debounce = 45.0            # muting does not release the mic, so this is
                                 # really for device switches and tab reloads
 require_playback_for_ambiguous = true
 
+# How microphone use is detected.
+#   "sessions" — live WASAPI capture sessions, read from the audio engine.
+#                Cannot go stale, and reports which mic an app is using.
+#   "consent"  — the registry consent store. Gives a true meeting start time
+#                (so a late start still gets the real timestamp), but on some
+#                Windows builds it silently stops being written: one machine
+#                had nothing newer than two months old while Settings showed
+#                the same day's activity.
+#   "auto"     — sessions when available, consent otherwise.
+detection_source = "auto"
+
 # Replaces the built-in list entirely, so include everything you use.
 # Run `py -m meetingrec list` during a real call to get exact names —
 # new Teams reports as a packaged identity, not an exe.
@@ -108,6 +119,11 @@ screenshot_max_per_meeting = 200
 backend = "drive"
 drive_folder = "Meeting Recordings"
 group_by = "month"              # month | day | flat
+
+# One folder per meeting inside that. With screenshots on, a flat month
+# folder mixes every call's audio and images together; this keeps each
+# meeting self-contained.
+folder_per_meeting = true
 
 # Auto-detected if omitted. Set explicitly with several Drive accounts.
 # drive_root = "G:/My Drive"

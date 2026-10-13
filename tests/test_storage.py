@@ -45,3 +45,41 @@ def test_local_archive_does_not_overwrite(tmp_path):
 def test_missing_source_fails_cleanly(tmp_path):
     result = LocalArchive(tmp_path).archive(tmp_path / "nope.wav", "", {})
     assert not result.ok and "missing" in result.error
+
+
+def test_session_subdir_adds_a_folder_per_meeting():
+    """
+    With screenshots on, one meeting is three WAVs plus a dozen JPEGs plus
+    sidecars. Flat month folders interleave meetings; a slug folder keeps each
+    call self-contained.
+    """
+    from datetime import datetime
+
+    from meetingrec.storage import session_subdir
+
+    d = datetime(2026, 10, 12, 14, 5)
+    slug = "20261012-140530-msteams_8wekyb3d8bbwe"
+    assert session_subdir(d, "WINMAX2", "month", slug) == \
+        "WINMAX2/2026/10/20261012-140530-msteams_8wekyb3d8bbwe"
+    # unchanged when no slug is passed
+    assert session_subdir(d, "WINMAX2", "month") == "WINMAX2/2026/10"
+
+
+def test_session_subdir_slug_works_with_every_grouping():
+    from datetime import datetime
+
+    from meetingrec.storage import session_subdir
+
+    d = datetime(2026, 10, 12)
+    assert session_subdir(d, "M", "day", "mtg").startswith("M/2026/10/12/")
+    assert session_subdir(d, "M", "flat", "mtg") == "M/mtg"
+
+
+def test_session_subdir_sanitises_the_slug():
+    from datetime import datetime
+
+    from meetingrec.storage import session_subdir
+
+    out = session_subdir(datetime(2026, 10, 12), "M", "flat", "Q3 Review: Ops/L&D")
+    assert "/" not in out.split("M/")[1]
+    assert ":" not in out

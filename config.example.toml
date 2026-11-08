@@ -35,7 +35,12 @@ detection_source = "auto"
 [capture]
 sample_rate = 48000
 preroll_seconds = 30.0          # system audio only; the mic opens on demand
-min_session_seconds = 60.0      # shorter meetings are DELETED, not archived
+# Recordings shorter than this are discarded: accidental triggers, a call
+# joined and left again. The deletion is logged as a WARNING naming the
+# meeting, so it is never silent. Set discard_short_sessions = false to
+# archive short recordings anyway.
+min_session_seconds = 30.0
+discard_short_sessions = true
 
 # Mics in priority order. Put the device you actually wear first: a dongle
 # whose headset is switched off opens cleanly and records pure digital
@@ -111,6 +116,40 @@ screenshot_change_threshold = 12   # dhash bits 0-64; lower = fussier.
                                    # a moving cursor 0, webcam churn 2.
 screenshot_quality = 70
 screenshot_max_per_meeting = 200
+
+[post_process]
+# Diarise and transcribe automatically once a meeting is archived.
+#
+# The work runs OUT OF PROCESS, at below-normal priority, and waits for any
+# live recording to finish first. Transcribing a long meeting saturates the
+# CPU for many minutes; contention during capture shows up as dropouts in a
+# recording that cannot be redone, so a late transcript is the cheaper
+# failure. A crash in torch or whisper also cannot take the recorder with it.
+post_process = false
+post_process_delay = 300.0        # seconds after the meeting ends
+
+# Speaker identification. Leave the library unset to skip diarisation and
+# transcribe with "Me" and "Others" only.
+# post_process_library = "C:/Users/Grayson/Biggby/Plaud Desktop Replacement/BIGGBY_Speaker_Profiles/voiceprints.json"
+# post_process_me = "Grayson_Terry"     # warns if your voice leaks to the system track
+post_process_mic_label = "Me"           # how your own track is labelled
+
+whisper_model = "medium"          # tiny base small medium large-v3
+
+# CPU threads for transcription. Unset uses half the cores, which keeps
+# permanent headroom so contention rarely arises at all. If a meeting does
+# start mid-transcription the process is SUSPENDED rather than killed —
+# whisper keeps no checkpoint, so killing it discards every minute already
+# spent, while a frozen process uses no CPU and resumes exactly where it was.
+# whisper_threads = 6
+
+# Only process during these hours, e.g. "18:00-07:00". Transcription is the
+# heaviest thing this project does; confining it to the evening means it never
+# competes with your actual work. Windows crossing midnight are handled.
+# Work queued outside the window waits, and the queue is written to disk so
+# stopping the recorder before the window opens does not discard it.
+# post_process_window = "18:00-07:00"
+# summarise_with = "gpt-oss:20b"  # local Ollama model for a summary pass
 
 [storage]
 # "drive"    = Google Drive for Desktop (filesystem move, no auth) <- start here

@@ -23,3 +23,8 @@ dist/
 # windows
 Thumbs.db
 desktop.ini
+
+# runtime
+logs/
+postprocess-queue.json
+*.tmp

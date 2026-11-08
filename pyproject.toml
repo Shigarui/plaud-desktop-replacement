@@ -25,6 +25,8 @@ driveapi = [
 ]
 # Window-pinned screenshots during meetings.
 screenshots = ["mss>=9.0", "pillow>=10.0", "psutil>=5.9"]
+# Transcription post-processing (scripts/transcribe.py). CPU int8 is fine.
+transcribe = ["faster-whisper>=1.0"]
 dev = ["pytest>=8.0"]
 
 [project.scripts]

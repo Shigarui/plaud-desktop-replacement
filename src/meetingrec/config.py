@@ -45,7 +45,11 @@ class Config:
     # --- capture ---
     sample_rate: int = 48000
     preroll_seconds: float = 30.0
-    min_session_seconds: float = 60.0  # discard anything shorter
+    # Recordings shorter than this are discarded — accidental triggers, a
+    # call joined and immediately left. Set discard_short_sessions = false to
+    # archive them anyway; a two-minute check-in can still be worth keeping.
+    min_session_seconds: float = 30.0
+    discard_short_sessions: bool = True
     # One name, or a list in priority order:
     #   mic_device = ["Headset Microphone (Poly BT700)", "Headset (soundcore ...)"]
     # Matching is loose, so a distinctive fragment is enough.
@@ -94,6 +98,24 @@ class Config:
     # None uses the built-in list (password managers, banking, private windows).
     screenshot_exclude: Optional[list] = None
 
+    # --- post-processing ---
+    # Diarise and transcribe automatically after a meeting. Runs out of
+    # process, at low priority, and waits for any live recording to finish —
+    # transcription saturates the CPU and a dropped recording cannot be redone.
+    post_process: bool = False
+    post_process_delay: float = 300.0        # seconds after the meeting ends
+    post_process_library: Optional[str] = None   # voiceprints.json
+    post_process_me: Optional[str] = None        # your profile name
+    post_process_mic_label: str = "Me"           # label for your track
+    whisper_model: str = "medium"
+    # CPU threads for transcription. None uses half the cores, which keeps
+    # permanent headroom so contention rarely becomes a problem at all.
+    whisper_threads: Optional[int] = None
+    # Only process during these hours, e.g. "18:00-07:00". Work queued outside
+    # the window waits, and the queue survives restarts so nothing is lost.
+    post_process_window: Optional[str] = None
+    summarise_with: Optional[str] = None         # e.g. "gpt-oss:20b"
+
     # --- storage ---
     # backend: "drive" (Drive for Desktop), "driveapi" (API v3), or "local"
     backend: str = "drive"
@@ -130,7 +152,8 @@ class Config:
             raw: dict[str, Any] = tomllib.load(fh)
 
         flat: dict[str, Any] = {}
-        for section in ("detection", "capture", "screenshots", "storage", "paths", "misc"):
+        for section in ("detection", "capture", "screenshots", "post_process",
+                        "storage", "paths", "misc"):
             flat.update(raw.get(section, {}))
         flat.update({k: v for k, v in raw.items() if not isinstance(v, dict)})
 

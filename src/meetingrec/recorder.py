@@ -103,6 +103,7 @@ class StreamStats:
     blocks: int = 0
     errors: int = 0
     device: str = ""
+    discontinuities: int = 0  # buffer gaps the driver reported
     first_sample_monotonic: Optional[float] = None  # wall clock of frame 0
     dead_devices: tuple = ()  # opened fine but produced only digital silence
     rate: int = 0  # rate actually negotiated, which may not be the one requested
@@ -207,6 +208,7 @@ class _Stream(threading.Thread):
         self._armed_frames = 0
         self._zero_frames = 0
         self._bad_devices: set[str] = set()
+        self._default_at_open: Optional[str] = None
         self.silence_check_seconds = 12.0
         self.silence_threshold = 0.99
         self._active = threading.Event()
@@ -270,6 +272,12 @@ class _Stream(threading.Thread):
             self.stats.fallback = i > 0
             self.stats.rate = reader.rate
             self.stats.dead_devices = tuple(sorted(self._bad_devices))
+            # Remember the default as it was when we opened. Comparing the
+            # live default against the device we actually settled on loops
+            # forever whenever the default cannot be opened: we fall back,
+            # notice the mismatch, reopen, fall back again — twice a second,
+            # with nothing recorded in between.
+            self._default_at_open = _default_speaker_name() if self.loopback else None
             # A device may open at a rate we did not ask for (Bluetooth HFP
             # runs at 16 kHz and cannot be persuaded otherwise). Track the
             # real rate so drift maths and the WAV header agree with reality.
@@ -305,8 +313,16 @@ class _Stream(threading.Thread):
                 while not self._stopping.is_set() and self._active.is_set():
                     data = reader.read(self.block)
                     self._handle(np.asarray(data, dtype=np.float32), time.monotonic())
-                    if self._writer is not None and self._armed_frames >= \
-                            self.rate * self.silence_check_seconds:
+                    reported = getattr(reader, "discontinuities", 0)
+                    if reported:
+                        self.stats.discontinuities = reported
+                    # Microphones only. A silent mic means a dead device — a
+                    # live one always has a noise floor. A silent loopback
+                    # just means nobody is playing anything, which is the
+                    # normal state for most of a meeting.
+                    if (not self.loopback and self._writer is not None
+                            and self._armed_frames
+                            >= self.rate * self.silence_check_seconds):
                         ratio = self._zero_frames / max(self._armed_frames, 1)
                         self._armed_frames = 0
                         self._zero_frames = 0
@@ -322,9 +338,11 @@ class _Stream(threading.Thread):
                     if self.loopback and time.monotonic() >= next_check:
                         next_check = time.monotonic() + self._switch_check_interval
                         current = _default_speaker_name()
-                        if current and current != reader.device:
-                            log.warning("[%s] default output moved to %s — reopening",
-                                        self.role, current)
+                        if (current and self._default_at_open
+                                and current != self._default_at_open):
+                            log.warning("[%s] default output moved from %s to %s "
+                                        "— reopening", self.role,
+                                        self._default_at_open, current)
                             switched = True
                             break
                 if switched:

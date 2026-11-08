@@ -7,6 +7,7 @@ import logging
 import sys
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from .config import Config
@@ -18,6 +19,8 @@ from .detector import (
     MeetingSession,
     build_mic_source,
 )
+from .postprocess import PostProcessor
+from .singleton import AlreadyRunning, SingleInstance
 from .recorder import DualRecorder, list_devices
 from .screenshots import ScreenshotCapturer
 from .storage import build_backend, find_drive_desktop_root, safe_name, session_subdir
@@ -41,6 +44,9 @@ def _print_track_stats(result, cfg: Config) -> None:
               f"padded={st.get('frames_padded', 0) / max(rate, 1):.2f}s "
               f"errors={st.get('errors', 0)}"
               + ("  (FALLBACK)" if st.get("fallback") else ""))
+        if st.get("discontinuities"):
+            print(f"         driver gaps: {st['discontinuities']} buffer "
+                  f"discontinuities reported")
         if st.get("dead_devices"):
             print(f"         DEAD DEVICES SKIPPED: {', '.join(st['dead_devices'])}")
         if st.get("dropouts"):
@@ -103,8 +109,16 @@ def cmd_watch(cfg: Config) -> int:
     try:
         while True:
             state = d.poll_once()
-            holders = ", ".join(str(u) for u in d.qualifying_apps()) or "-"
-            line = f"{state:<12} {holders}"
+            # Show the SESSION start, not each MicUser's stamp: a live capture
+            # session is stamped "now" every poll, so printing that makes a
+            # steady meeting look like it restarts every two seconds.
+            names = ", ".join(sorted({u.name for u in d.qualifying_apps()})) or "-"
+            if d.session:
+                since = d.session.started_at.astimezone().strftime("%H:%M:%S")
+                elapsed = str(d.session.duration).split(".")[0]
+                line = f"{state:<12} {names} (since {since}, {elapsed})"
+            else:
+                line = f"{state:<12} {names}"
             if line != last:
                 print(f"[{datetime.now():%H:%M:%S}] {line}")
                 last = line
@@ -182,9 +196,45 @@ def cmd_testrecord(cfg: Config, seconds: float = 15.0, mic: Optional[str] = None
 
 def cmd_run(cfg: Config) -> int:
     """The real thing: detect, record, archive."""
+    lock = SingleInstance(Path(__file__).resolve().parents[2] / "logs" / "meetingrec.pid")
+    try:
+        lock.acquire()
+    except AlreadyRunning as exc:
+        log.error("%s — not starting a second recorder", exc)
+        log.error("two recorders fight over the audio devices and both capture "
+                  "worse audio than one")
+        return 1
+
+    try:
+        return _run(cfg)
+    finally:
+        lock.release()
+
+
+def _run(cfg: Config) -> int:
     backend = build_backend(cfg)
     rec = _build_recorder(cfg)
     rec.start()
+
+    post: Optional[PostProcessor] = None
+    if cfg.post_process:
+        post = PostProcessor(
+            project_root=Path(__file__).resolve().parents[2],
+            python_exe=sys.executable,
+            delay_seconds=cfg.post_process_delay,
+            library=cfg.post_process_library,
+            me=cfg.post_process_me,
+            mic_label=cfg.post_process_mic_label,
+            whisper_model=cfg.whisper_model,
+            threads=cfg.whisper_threads,
+            window=cfg.post_process_window,
+            queue_file=cfg.staging_dir / "postprocess-queue.json",
+            summarise=cfg.summarise_with,
+            busy=lambda: rec.armed,
+        )
+        post.start()
+        log.info("post-processing on: %.0f min after each meeting",
+                 cfg.post_process_delay / 60)
 
     shots: Optional[ScreenshotCapturer] = None
     if cfg.screenshots:
@@ -222,16 +272,27 @@ def cmd_run(cfg: Config) -> int:
         for role, st in result.stats.items():
             if role == "alignment" or not isinstance(st, dict):
                 continue
+            if st.get("discontinuities"):
+                log.info("[%s] %d buffer discontinuities reported by the driver",
+                         role, st["discontinuities"])
             if st.get("dead_devices"):
                 log.error("[%s] recorded from a dead device during this meeting: %s",
                           role, ", ".join(st["dead_devices"]))
 
         if result.duration_seconds < cfg.min_session_seconds:
-            log.info("discarding %.0fs session (under min_session_seconds)",
-                     result.duration_seconds)
-            for p in result.paths:
-                p.unlink(missing_ok=True)
-            return
+            # Loud, and it names the threshold. Deleting a recording quietly
+            # is the kind of thing you discover weeks later when you go
+            # looking for a call that was shorter than you remembered.
+            if cfg.discard_short_sessions:
+                log.warning("DISCARDING %.0fs recording of %s — shorter than "
+                            "min_session_seconds (%.0fs). Set discard_short_sessions "
+                            "= false to keep these.",
+                            result.duration_seconds, s.app, cfg.min_session_seconds)
+                for p in result.paths:
+                    p.unlink(missing_ok=True)
+                return
+            log.info("keeping %.0fs recording (under min_session_seconds, "
+                     "but discard_short_sessions is off)", result.duration_seconds)
 
         subdir = session_subdir(
             s.started_at.astimezone(), cfg.machine, cfg.group_by,
@@ -250,11 +311,17 @@ def cmd_run(cfg: Config) -> int:
             meta["screenshots"] = len(extra)
             meta["window_title"] = shot_stats.window_title
 
+        archived_to: Optional[Path] = None
         for path in result.paths + extra:
             outcome = backend.archive(path, subdir, meta)
+            if outcome.ok and archived_to is None:
+                archived_to = Path(outcome.location).parent
             if not outcome.ok:
                 log.error("archive failed for %s: %s — file kept in staging",
                           path.name, outcome.error)
+
+        if post and archived_to:
+            post.submit(archived_to)
 
     detector = MeetingDetector(
         mic_source=build_mic_source(cfg.detection_source),
@@ -275,6 +342,8 @@ def cmd_run(cfg: Config) -> int:
         rec.shutdown()
         if shots:
             shots.stop()
+        if post:
+            post.stop()
     return 0
 
 
@@ -289,6 +358,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--seconds", type=float, default=15.0, help="testrecord length")
     p.add_argument("--mic", help="override mic_device for this run (partial name is fine)")
     p.add_argument("-v", "--verbose", action="store_true")
+    p.add_argument("--log-file", default=None,
+                   help="where to write the rotating log (default logs/meetingrec.log)")
     args = p.parse_args(argv)
 
     # Windows consoles default to a legacy code page (cp1252), so any log line
@@ -300,11 +371,33 @@ def main(argv: list[str] | None = None) -> int:
         except Exception:
             pass
 
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    level = logging.DEBUG if args.verbose else logging.INFO
+    fmt = logging.Formatter("%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+                            datefmt="%H:%M:%S")
+    root = logging.getLogger()
+    root.setLevel(level)
+
+    console = logging.StreamHandler()
+    console.setFormatter(fmt)
+    root.addHandler(console)
+
+    # Always log to a file as well. Under Task Scheduler there is no console
+    # at all, so without this a meeting that fails to record leaves no trace
+    # anywhere — and the whole point of running unattended is not watching.
+    log_path = Path(args.log_file) if args.log_file else \
+        Path(__file__).resolve().parents[2] / "logs" / "meetingrec.log"
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        from logging.handlers import RotatingFileHandler
+
+        rotating = RotatingFileHandler(log_path, maxBytes=2_000_000,
+                                       backupCount=5, encoding="utf-8")
+        rotating.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)-7s %(name)s: %(message)s"))
+        root.addHandler(rotating)
+        log.info("logging to %s", log_path)
+    except Exception as exc:
+        log.warning("could not open the log file (%r) — console only", exc)
     if sys.platform != "win32":
         print("meetingrec only runs on Windows.", file=sys.stderr)
         return 2

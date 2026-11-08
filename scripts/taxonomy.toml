@@ -1,0 +1,121 @@
+# Naming and categorisation rules.
+#
+# Edit this rather than the code: rosters change, trigger phrases get added,
+# and none of that should need a code change or a new release.
+
+[people]
+# The person whose recordings these are. Excluded from every talk-time
+# calculation, exactly as the naming rule requires.
+me = "Grayson Terry"
+
+# Used by the group-call rule and the team-member routine.
+team = ["Angela Combs", "Adam Chandler", "Dan Baron", "Matt Kaczor",
+        "Jeff Bennett", "Katie Bacon", "Shereelyn Reed"]
+
+leadership = ["Erin Kaylor", "Laura Eich", "Jodi Latuszek", "Alisha Beck"]
+technology = ["Josh Collins", "Vincent Cantu", "Jason Perez"]
+
+[thresholds]
+dominant_percent = 20.0       # a speaker must hold this share to be named
+unlabeled_competes = 10.0     # an unnamed voice above this breaks the 1:1 rule
+max_named_speakers = 3
+group_call_team_members = 4   # more than this many of the team -> group meeting
+trim_hours = 3.0
+
+# --- content taxonomy -----------------------------------------------------
+# Order matters: the first category whose signals match wins, so the
+# specific ones come before the general.
+
+[[category]]
+name = "Notes to Self"
+folder = "1-Note To Self"
+solo_only = true              # one speaker and no one else
+phrases = ["just wanted to note", "reminder to myself", "don't forget",
+           "voicemail to", "quick thought", "idea for", "need to circle back",
+           "make sure I"]
+
+[[category]]
+name = "Franchisee Visits, Audits & QBR"
+folder = "5-Franchisees"
+phrases = ["store visit", "field visit", "on-site", "store audit", "qbr",
+           "quarterly business review", "safetyculture", "food safety",
+           "ghost barista", "cogs", "ticket average", "scorecard",
+           "action plan", "follow-up visit", "franchisee"]
+patterns = ["\\bstore\\s+\\d{1,4}\\b"]
+
+[[category]]
+name = "Systems, Tools & Technology"
+folder = "4-Biggby/Systems"
+people = ["Josh Collins", "Vincent Cantu", "Jason Perez"]
+phrases = ["freshdesk", "crunchtime", "otter", "doordash", "ivr", "fcl",
+           "franchise community line", "tech support", "ticket routing",
+           "answer connect", "voip", "product demo", "system access",
+           "onboarding call", "pos", "rollout", "implementation",
+           "integration"]
+
+[[category]]
+name = "Corporate Strategy & Leadership"
+folder = "4-Biggby/Corporate"
+people = ["Erin Kaylor", "Laura Eich", "Jodi Latuszek", "Alisha Beck"]
+phrases = ["company huddle", "leadership alignment", "executive update",
+           "l10", "annual planning", "q-over-q", "company-wide",
+           "fiscal year", "board", "strategic initiative"]
+
+[[category]]
+name = "Field Team Management & Coaching"
+folder = "3-Field Team"
+people_from = "team"          # any of the configured team roster
+phrases = ["territory", "pipeline", "caseload", "workload delegation",
+           "fbc", "oss", "field cadence", "coaching call", "accounts receivable",
+           "at-risk", "qbr prep", "field readiness", "progress, not perfection"]
+
+# --- meeting types --------------------------------------------------------
+# Checked in order; the first match wins, which is how the precedence rules
+# (Audit over Field Visit, Coaching over One on One, QBR over Ops Meeting)
+# are expressed.
+
+[[type]]
+name = "Notes to Self"
+solo_only = true
+
+[[type]]
+name = "Audit"
+phrases = ["store audit", "audit score", "checklist", "safetyculture",
+           "inspection", "scored criteria"]
+
+[[type]]
+name = "QBR"
+phrases = ["qbr", "quarterly business review"]
+
+[[type]]
+name = "Coaching Call"
+phrases = ["coaching call", "coaching conversation", "development plan",
+           "growth area", "let's work on", "progress, not perfection"]
+
+[[type]]
+name = "Company Huddle"
+phrases = ["company huddle", "all-hands", "all hands", "company-wide"]
+
+[[type]]
+name = "Product Demo"
+phrases = ["product demo", "walk you through the tool", "demo of", "walkthrough"]
+
+[[type]]
+name = "Onboarding Call"
+phrases = ["onboarding", "getting you set up", "training on", "new process"]
+
+[[type]]
+name = "Field Visit"
+phrases = ["store visit", "field visit", "on-site", "out at the store"]
+
+[[type]]
+name = "Ops Meeting"
+phrases = ["operations", "ops meeting", "business review", "agenda"]
+
+[[type]]
+name = "One on One"
+one_to_one = true             # exactly one other dominant speaker
+
+[[type]]
+name = "Ops Meeting"          # last resort for anything multi-party
+fallback = true

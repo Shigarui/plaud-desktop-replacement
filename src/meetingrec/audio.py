@@ -302,7 +302,16 @@ def find_input_device(name: Optional[str]) -> Optional[tuple[int, str]]:
 
 
 class SoundcardReader:
-    """WASAPI loopback via soundcard. Only used for system audio."""
+    """
+    WASAPI loopback via soundcard. Only used for system audio.
+
+    soundcard raises a Python warning on every buffer gap, which Python prints
+    straight to stderr outside our logging. During a long meeting that floods
+    the console and buries the lines worth reading. The warnings are counted
+    here instead and reported once in the session summary, which is both
+    quieter and more useful — we previously had no measure of loopback gaps
+    at all, only mic ones.
+    """
 
     def __init__(self, device, rate: int, channels: int, block: int):
         self._device = device
@@ -312,6 +321,7 @@ class SoundcardReader:
         self.block = block
         self._cm = None
         self._rec = None
+        self.discontinuities = 0
 
     def __enter__(self) -> "SoundcardReader":
         self._cm = self._device.recorder(
@@ -331,7 +341,18 @@ class SoundcardReader:
 
     def read(self, frames: int) -> np.ndarray:
         assert self._rec is not None
-        return np.asarray(self._rec.record(numframes=frames), dtype=np.float32)
+        import warnings
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            data = self._rec.record(numframes=frames)
+        for entry in caught:
+            if "discontinuity" in str(entry.message).lower():
+                self.discontinuities += 1
+            else:
+                warnings.warn_explicit(entry.message, entry.category,
+                                       entry.filename, entry.lineno)
+        return np.asarray(data, dtype=np.float32)
 
 
 def loopback_devices() -> list:

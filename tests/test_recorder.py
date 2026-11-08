@@ -933,3 +933,129 @@ def test_stream_has_no_method_shadowing_thread_attributes():
     ours = {n for n in vars(_Stream) if n.startswith("_")
             and callable(getattr(_Stream, n, None))}
     assert not (ours & reserved), f"shadowed by Thread: {sorted(ours & reserved)}"
+
+
+def test_loopback_does_not_reopen_when_it_fell_back(monkeypatch):
+    """
+    The default output can be unopenable — Bluetooth earbuds that are still
+    "default" but asleep. We fall back to another endpoint, and comparing the
+    live default against the device we settled on then mismatches forever:
+    observed reopening twice a second for minutes, recording nothing.
+    """
+    import time as _time
+    from meetingrec import recorder as rec_mod
+
+    opens = []
+
+    class _Reader(_FakeReader):
+        def __enter__(self):
+            opens.append(self.device)
+            return super().__enter__()
+
+    # default is the soundcore, but only the Senary endpoint will open
+    monkeypatch.setattr(rec_mod, "_default_speaker_name",
+                        lambda: "Headphones (soundcore)")
+    s = _Stream("system", rate=48000, channels=2, block=256,
+                preroll_seconds=0.5, loopback=True)
+    s._switch_check_interval = 0.05
+    monkeypatch.setattr(s, "_readers", lambda: [_Reader("Speakers (Senary Audio)",
+                                                        channels=2)])
+    s.start()
+    try:
+        _time.sleep(0.8)
+    finally:
+        s.stop()
+        s.join(timeout=2)
+    assert len(opens) == 1, f"reopened {len(opens)} times without the default changing"
+
+
+def test_loopback_still_follows_a_real_default_change(monkeypatch):
+    import time as _time
+    from meetingrec import recorder as rec_mod
+
+    opens = []
+    default = {"name": "Speakers (Senary Audio)"}
+
+    class _Reader(_FakeReader):
+        def __enter__(self):
+            opens.append(self.device)
+            return super().__enter__()
+
+    monkeypatch.setattr(rec_mod, "_default_speaker_name", lambda: default["name"])
+    s = _Stream("system", rate=48000, channels=2, block=256,
+                preroll_seconds=0.5, loopback=True)
+    s._switch_check_interval = 0.05
+    monkeypatch.setattr(s, "_readers",
+                        lambda: [_Reader(default["name"], channels=2)])
+    s.start()
+    try:
+        _time.sleep(0.3)
+        default["name"] = "Headphones (soundcore)"
+        _time.sleep(0.5)
+    finally:
+        s.stop()
+        s.join(timeout=2)
+    assert len(opens) >= 2, "did not follow a genuine default change"
+    assert "Headphones (soundcore)" in opens
+
+
+def test_silence_watchdog_ignores_loopback(tmp_path, monkeypatch):
+    """
+    A quiet loopback is normal — nobody is playing anything. Treating that as
+    a dead device cycled through every output endpoint mid-meeting.
+    """
+    import time as _time
+
+    s = _Stream("system", rate=48000, channels=2, block=4800,
+                preroll_seconds=0.1, loopback=True)
+    s.silence_check_seconds = 0.2
+    monkeypatch.setattr(s, "_readers", lambda: [_SilentReader("quiet output",
+                                                              channels=2)])
+    s.start()
+    try:
+        s.arm(tmp_path / "s.wav")
+        _time.sleep(1.0)
+        assert s._bad_devices == set(), "marked a silent loopback as dead"
+        s.disarm()
+    finally:
+        s.stop()
+        s.join(timeout=2)
+
+
+def test_cli_accepts_a_log_file_and_every_command():
+    """
+    Running under Task Scheduler means no console, so a log file is the only
+    record that a meeting failed to record. Also guards the command list,
+    which a bad edit has silently truncated before.
+    """
+    import argparse
+    import inspect
+
+    from meetingrec import __main__ as cli
+
+    source = inspect.getsource(cli.main)
+    assert "--log-file" in source
+    for command in ("list", "watch", "storage", "devices", "testrecord", "run"):
+        assert f'"{command}"' in source, f"{command} missing from the CLI"
+    assert all(hasattr(cli, f"cmd_{c}") for c in
+               ("list", "watch", "storage", "devices", "testrecord", "run"))
+
+
+def test_short_session_discard_is_configurable_and_loud():
+    """
+    Deleting a recording quietly is the kind of thing you discover weeks later
+    when you go looking for a call that ran shorter than you remembered.
+    """
+    import inspect
+
+    from meetingrec import __main__ as cli
+    from meetingrec.config import Config
+
+    assert hasattr(Config, "discard_short_sessions")
+    assert Config().discard_short_sessions is True
+    assert Config().min_session_seconds == 30.0
+
+    # cmd_run is only the single-instance wrapper; the loop lives in _run.
+    source = inspect.getsource(cli._run)
+    assert "discard_short_sessions" in source
+    assert "log.warning" in source, "discarding a recording must not be logged quietly"

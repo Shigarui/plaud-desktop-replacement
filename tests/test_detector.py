@@ -180,3 +180,35 @@ def test_detector_accepts_session_shaped_users():
                    device="Headset")
     d = MeetingDetector(mic_source=lambda: [user], playback_source=lambda: set())
     assert d.poll_once() == IN_MEETING
+
+
+def test_session_keeps_its_first_start_time_across_polls():
+    """
+    A live capture session reports "now" on every read. The meeting's start
+    must come from the first sighting, or every duration in the archived
+    metadata is wrong and min_session_seconds measures the wrong thing.
+    """
+    from datetime import timedelta
+
+    from meetingrec.detector import MeetingDetector, MicUser
+
+    stamps = iter([
+        datetime(2026, 10, 13, 12, 53, 3, tzinfo=timezone.utc),
+        datetime(2026, 10, 13, 12, 53, 20, tzinfo=timezone.utc),
+        datetime(2026, 10, 13, 12, 53, 39, tzinfo=timezone.utc),
+    ])
+    current = {"t": None}
+
+    def source():
+        nxt = next(stamps, current["t"])
+        current["t"] = nxt
+        return [MicUser(key="pid:1", name="ms-teams.exe", path=None,
+                        packaged=False, started_at=nxt, device="Headset")]
+
+    d = MeetingDetector(mic_source=source, playback_source=lambda: set())
+    d.poll_once()
+    first = d.session.started_at
+    d.poll_once()
+    d.poll_once()
+    assert d.session.started_at == first, "start time drifted with each poll"
+    assert d.session.duration >= timedelta(0)

@@ -335,19 +335,78 @@ class DriveApiArchive:
 # --------------------------------------------------------------------------
 
 
+class DeferredDriveArchive(StorageBackend):
+    """
+    Drive for Desktop, resolved when it is actually needed.
+
+    The recorder starts shortly after logon, and Drive for Desktop often has
+    not finished mounting by then. Resolving the backend once at startup
+    therefore found nothing, fell back to local, and stayed that way for the
+    whole session — so every meeting that day was archived to the staging
+    folder and silently never reached Drive.
+
+    Nothing about that is an error worth giving up on: the mount appears a
+    minute or two later and works fine. So resolution is retried on every
+    archive call until it succeeds, and only then cached. If Drive never
+    appears, files stay in staging and are picked up by a later run.
+    """
+
+    name = "drive"
+
+    def __init__(self, folder: str = "Meeting Recordings",
+                 root: Optional[Path] = None):
+        self._folder = folder
+        self._root = root
+        self._real: Optional[DriveDesktopArchive] = None
+        self._complained = False
+
+    def _resolve(self) -> Optional[DriveDesktopArchive]:
+        if self._real is not None:
+            return self._real
+        try:
+            self._real = DriveDesktopArchive(folder=self._folder, root=self._root)
+            if self._complained:
+                log.info("Drive for Desktop is available now — archiving resumed")
+            return self._real
+        except Exception as exc:
+            if not self._complained:
+                # Once, not on every file: a 40-screenshot meeting would
+                # otherwise write 40 identical errors.
+                log.warning("Drive for Desktop not mounted yet (%s) — "
+                            "keeping files in staging and retrying", exc)
+                self._complained = True
+            return None
+
+    def archive(self, path: Path, subdir: str,
+                metadata: dict[str, Any]) -> ArchiveResult:
+        backend = self._resolve()
+        if backend is None:
+            return ArchiveResult(False, "", self.name,
+                                 "Drive not mounted — file kept in staging")
+        return backend.archive(path, subdir, metadata)
+
+    def available(self) -> bool:
+        return self._resolve() is not None
+
+
 def build_backend(cfg) -> StorageBackend:
     """Construct the backend named in config, falling back to local on error."""
     choice = (getattr(cfg, "backend", None) or "local").lower()
 
     if choice == "drive":
-        try:
-            return DriveDesktopArchive(
-                folder=getattr(cfg, "drive_folder", "Meeting Recordings"),
-                root=getattr(cfg, "drive_root", None),
-            )
-        except Exception as exc:
-            log.error("Drive for Desktop unavailable (%s) — falling back to local", exc)
-            choice = "local"
+        # Deferred rather than resolved here: at logon Drive is usually still
+        # mounting, and a permanent fallback to local loses a whole day of
+        # archiving to a few seconds of timing.
+        backend = DeferredDriveArchive(
+            folder=getattr(cfg, "drive_folder", "Meeting Recordings"),
+            root=getattr(cfg, "drive_root", None),
+        )
+        if backend.available():
+            log.info("Drive for Desktop archive ready")
+        else:
+            log.info("Drive for Desktop not mounted yet — will retry as "
+                     "meetings finish")
+        return backend
 
     if choice == "driveapi":
         return DriveApiArchive(

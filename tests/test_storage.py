@@ -83,3 +83,62 @@ def test_session_subdir_sanitises_the_slug():
     out = session_subdir(datetime(2026, 10, 12), "M", "flat", "Q3 Review: Ops/L&D")
     assert "/" not in out.split("M/")[1]
     assert ":" not in out
+
+
+# --- Drive mounting late at logon -------------------------------------------
+
+
+def test_drive_is_retried_rather_than_abandoned(tmp_path, monkeypatch):
+    """
+    The recorder starts shortly after logon, before Drive for Desktop has
+    mounted. Resolving once and falling back to local meant a whole day of
+    recordings silently never reached Drive.
+    """
+    from meetingrec import storage as mod
+
+    mounted = {"yet": False}
+    real_root = tmp_path / "DriveFS"
+
+    def fake_find():
+        return real_root if mounted["yet"] else None
+
+    monkeypatch.setattr(mod, "find_drive_desktop_root", fake_find)
+    backend = mod.DeferredDriveArchive(folder="Meeting Recordings")
+
+    assert backend.available() is False, "claimed Drive before it mounted"
+
+    real_root.mkdir()
+    mounted["yet"] = True
+    assert backend.available() is True, "never retried once Drive appeared"
+
+
+def test_a_file_is_kept_in_staging_while_drive_is_missing(tmp_path, monkeypatch):
+    from meetingrec import storage as mod
+
+    monkeypatch.setattr(mod, "find_drive_desktop_root", lambda: None)
+    backend = mod.DeferredDriveArchive()
+    src = tmp_path / "a.wav"
+    src.write_bytes(b"x")
+
+    result = backend.archive(src, "M/2026/10/mtg", {})
+    assert result.ok is False
+    assert "staging" in result.error
+    assert src.exists(), "the file must survive a failed archive"
+
+
+def test_the_missing_mount_is_reported_once_not_per_file(tmp_path, monkeypatch, caplog):
+    """A 40-screenshot meeting would otherwise write 40 identical errors."""
+    import logging
+
+    from meetingrec import storage as mod
+
+    monkeypatch.setattr(mod, "find_drive_desktop_root", lambda: None)
+    backend = mod.DeferredDriveArchive()
+    src = tmp_path / "a.wav"
+    src.write_bytes(b"x")
+
+    with caplog.at_level(logging.WARNING, logger="meetingrec.storage"):
+        for _ in range(5):
+            backend.archive(src, "M/2026/10/mtg", {})
+    warnings = [r for r in caplog.records if "not mounted yet" in r.message]
+    assert len(warnings) == 1, f"logged {len(warnings)} times"
